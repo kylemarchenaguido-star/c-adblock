@@ -11,6 +11,45 @@ Everything below is a straight port of working, already-understood logic in
 the Java file(s) it replaces so you can read the reference behavior instead
 of guessing at it.
 
+---
+
+## Architecture: this is a client AND a server, on two independent tracks
+
+The program sits in the middle of two separate connections. Neither side is
+optional and neither can substitute for the other:
+
+```
+[browser extension]  --HTTP-->  [YOUR SERVER :61616]  --(internally triggers)-->  [YOUR CLIENT]  --HTTPS-->  [Twitch]
+     (already built,                listens for the                    makes outbound requests to     www.twitch.tv
+      TypeScript, see                extension's requests                www.twitch.tv / gql.twitch.tv   gql.twitch.tv
+      extension/utils/api.ts)                                            / usher.ttvnw.net               usher.ttvnw.net
+```
+
+The extension can only `fetch()` a URL — it has no way to open a socket
+itself, so *something* has to be listening on `127.0.0.1:61616` to answer
+it: that's your **server**. Twitch doesn't push anything to you either — the
+only way to get a playback token or a playlist is to open a real HTTPS
+connection and ask: that's your **client**. Two roles, one process, wired
+together by your own code (that wiring is Stage 6/7 below).
+
+They're independent tracks up until that point — build/test order matters:
+
+| Track | Stages | Depends on Twitch being reachable? |
+|---|---|---|
+| **Client** (talks out to Twitch) | 1a → 2 → 3a → 4a/4b/4d/4e → 5 | Yes — this is the whole point of this track |
+| **Server** (talks in from the extension) | 1b → 3b → 4a → 7 | No — can be built and curl-tested standalone, before the client track exists at all |
+| **Shared** | 4a (JSON), 6 (registry glues both tracks together), 8 (tray), 9 (main) | — |
+
+Every stage below is tagged `[CLIENT]`, `[SERVER]`, or `[BOTH]` so it's
+obvious at a glance which track it belongs to. The client track has to
+produce a working playlist URL before there's anything meaningful to serve
+(Stage 5's "done when"), but the server track doesn't need to wait for
+that — it's fine, and arguably a good confidence-building detour, to get
+Stage 1b/3b answering `curl` requests with a hardcoded fake response while
+the client track is still being fought with Schannel.
+
+---
+
 Suggested new folder layout (create alongside the existing `twitch-adblock/`):
 
 ```
@@ -37,7 +76,7 @@ whole system running at once.
 
 ---
 
-## Stage 0 — Winsock bootstrap
+## Stage 0 — Winsock bootstrap `[BOTH]`
 
 **What:** `WSAStartup(MAKEWORD(2,2), &wsaData)` once at process start,
 `WSACleanup()` at exit. A couple of `std::string` error-formatting helpers
@@ -52,23 +91,48 @@ cleans up, exits 0.
 
 ---
 
-## Stage 1 — TCP socket wrapper
+## Stage 1a — TCP client socket `[CLIENT]`
 
-**What:** RAII class wrapping `socket()`/`connect()`/`send()`/`recv()`/
-`closesocket()`, plus a server-side path: `bind()`/`listen()`/`accept()`.
-Same primitive serves both the outbound Twitch client and the inbound
-localhost server — don't build two.
+**What:** the outbound half — a plain `struct TcpSocket { SOCKET handle; }`
+plus free functions (`tcp_connect`/`tcp_send`/`tcp_recv`/`tcp_close`), no
+classes/methods/RAII. Same discipline as raw `fd`s in C: the caller is
+responsible for calling `tcp_close()` on every exit path, success or
+error — nothing closes it automatically. `tcp_connect` is the one place
+that needs care, since `getaddrinfo()` allocates a list that must be freed
+via `freeaddrinfo()` on *every* return path. This is what you'll reuse for
+every single request the client track ever makes to Twitch (once Stage 2
+wraps it in TLS).
 
-**Files:** `net/socket.cpp/.h`
+**Files:** `net/socket.cpp/.h` (client-facing methods)
 
-**Done when:**
-- Client test: connect to `example.com:80`, send a raw `GET / HTTP/1.1`,
-  print whatever bytes come back.
-- Server test: bind `127.0.0.1:61616`, accept one connection, echo bytes.
+**Done when:** connect to `example.com:80` (plain HTTP, no TLS needed yet —
+that's Stage 2), send a raw `GET / HTTP/1.1\r\nHost: example.com\r\n
+Connection: close\r\n\r\n`, print whatever bytes come back. This proves the
+class works before Schannel adds a second layer of complexity on top of it
+in Stage 2.
 
 ---
 
-## Stage 2 — Schannel TLS (outbound only) — the hard stage
+## Stage 1b — TCP server socket `[SERVER]`
+
+**What:** the inbound half, same style as 1a — a `struct TcpListener {
+SOCKET handle; }` plus free functions (`tcp_listen`/`tcp_accept`), where
+`tcp_accept` hands back a `TcpSocket` (from 1a) for the accepted
+connection, reusing the same `tcp_send`/`tcp_recv`/`tcp_close` functions.
+This is the foundation the local HTTP server (Stage 3b) sits on — nothing
+here talks to Twitch, so you can build and prove this out completely
+independently of how Stage 1a/2 are going.
+
+**Files:** `net/socket.cpp/.h` (server-facing methods, same file as 1a)
+
+**Done when:** bind `127.0.0.1:61616`, accept one connection, echo
+whatever bytes it sends back. Test it with `curl http://127.0.0.1:61616/`
+or `Test-NetConnection 127.0.0.1 -Port 61616` from another terminal while
+it's running.
+
+---
+
+## Stage 2 — Schannel TLS `[CLIENT]` — the hard stage
 
 **What:** wrap a connected socket in TLS 1.2 using SSPI:
 1. `AcquireCredentialsHandle` once (a shared credential handle, reused
@@ -102,7 +166,7 @@ exact same state machine.
 
 ---
 
-## Stage 3a — Minimal HTTP/1.1 client
+## Stage 3a — Minimal HTTP/1.1 client `[CLIENT]`
 
 **What:** on top of Stage 2, a function that takes {host, path, method,
 headers, body} and returns {status, headers, body}. You need:
@@ -125,7 +189,7 @@ printing status + headers + body for both.
 
 ---
 
-## Stage 3b — Minimal HTTP/1.1 server
+## Stage 3b — Minimal HTTP/1.1 server `[SERVER]`
 
 **What:** on top of Stage 1 (no TLS), an accept loop that parses an incoming
 request line (`METHOD /path HTTP/1.1`), headers, and dispatches to a
@@ -142,7 +206,7 @@ connection is fine at this scale — no need for IOCP.
 
 ---
 
-## Stage 4a — JSON value type
+## Stage 4a — JSON value type `[BOTH]`
 
 **What:** a `JsonValue` variant (object/array/string/number/bool/null) with
 a recursive-descent parser and a serializer. This is the module most worth
@@ -168,7 +232,7 @@ diff it byte-for-byte against what the Java client would send.
 
 ---
 
-## Stage 4b — Three small scanners (no regex engine needed)
+## Stage 4b — Three small scanners `[CLIENT]` (no regex engine needed)
 
 **What:** hand-written substring extraction, not a general regex engine —
 these are the only three patterns the original code actually uses:
@@ -191,7 +255,7 @@ the extracted query/operationName/clientId match what the Java version logs.
 
 ---
 
-## Stage 4c — HLS attribute-list parser
+## Stage 4c — HLS attribute-list parser `[CLIENT]`
 
 **What:** parse `KEY=VALUE,KEY2="quoted, value",KEY3=val` (the tag body
 after `#EXT-X-STREAM-INF:` or `#EXT-X-MEDIA:`) into a key→value map,
@@ -210,7 +274,7 @@ RESOLUTION="1920x1080",...` line, confirm all keys extracted correctly.
 
 ---
 
-## Stage 4d — Master playlist parser
+## Stage 4d — Master playlist parser `[CLIENT]`
 
 **What:** walk a master playlist line by line; on `#EXT-X-MEDIA` and
 `#EXT-X-STREAM-INF` parse via 4c and stash as "pending"; on a non-`#` line
@@ -226,7 +290,7 @@ entries the Java `EXTM3U` would, in order.
 
 ---
 
-## Stage 4e — Cookie jar
+## Stage 4e — Cookie jar `[CLIENT]`
 
 **What:** parse `Set-Cookie` response headers (name, value, and enough of
 the attributes to know the cookie's domain — you don't need expiry/path
@@ -251,7 +315,7 @@ than baking cookie names into the jar itself.
 
 ---
 
-## Stage 5 — Twitch domain logic (wires 3a + 4a–4e together)
+## Stage 5 — Twitch domain logic `[CLIENT]` (wires 3a + 4a–4e together)
 
 Build and test these in order — each depends on the previous succeeding:
 
@@ -298,7 +362,7 @@ this is the moment the whole Twitch side is proven to work.
 
 ---
 
-## Stage 6 — Session registry
+## Stage 6 — Session registry `[BOTH]` (where the two tracks meet)
 
 **What:** `std::unordered_map<std::string, std::shared_ptr<Instance>>`
 behind a `std::mutex`. Starting an instance spawns a `std::thread` running
@@ -318,7 +382,7 @@ instance cleans itself out of the map without leaking the thread.
 
 ---
 
-## Stage 7 — Route handlers
+## Stage 7 — Route handlers `[SERVER]`
 
 **What:** wire Stage 3b's server to Stage 6:
 - `OPTIONS *` → 200, CORS headers only.
@@ -341,7 +405,7 @@ your server with no Java involved.
 
 ---
 
-## Stage 8 — Tray icon
+## Stage 8 — Tray icon `[BOTH]` (belongs to neither track — pure Win32 UI)
 
 **What:** a hidden `HWND` (message-only window is fine, or a normal hidden
 one), `Shell_NotifyIcon(NIM_ADD, ...)`, handle the tray's callback message
@@ -357,7 +421,7 @@ shuts down the server thread and the process.
 
 ---
 
-## Stage 9 — main.cpp + packaging
+## Stage 9 — main.cpp + packaging `[BOTH]`
 
 **What:** wire startup order — `WSAStartup` → `AcquireCredentialsHandle`
 (Stage 2's shared handle) → start Stage 7's server on a background thread

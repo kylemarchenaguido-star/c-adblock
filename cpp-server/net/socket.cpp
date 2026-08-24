@@ -2,10 +2,13 @@
 #include <WS2tcpip.h>
 #include <WinSock2.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <errhandlingapi.h>
 #include <minwinbase.h>
+#include <minwindef.h>
 #include <winbase.h>
+#include <thread>
 
 int tcp_connect(TcpSocket *sock, const char *host, const char *port){
   ZeroMemory(&sock->hints, sizeof(sock->hints));
@@ -19,61 +22,124 @@ int tcp_connect(TcpSocket *sock, const char *host, const char *port){
   if (i != 0){ printf("%d\n", i); return 0; }
 
   for (sock->ptr = sock->result; sock->ptr != NULL; sock->ptr = sock->ptr->ai_next){
-    sock->ConnectSocket = socket(sock->ptr->ai_family, sock->ptr->ai_socktype, sock->ptr->ai_protocol);
-    if (sock->ConnectSocket == INVALID_SOCKET){ printf("%ld\n", GetLastError());continue; }
-    if (connect(sock->ConnectSocket, sock->ptr->ai_addr, (int)sock->ptr->ai_addrlen) == 0){ break; }
+    sock->conn.handle = socket(sock->ptr->ai_family, sock->ptr->ai_socktype, sock->ptr->ai_protocol);
+    if (sock->conn.handle == INVALID_SOCKET){ 
+      printf("%ld\n", GetLastError());
+      continue;
+    }
+    if (connect(sock->conn.handle, sock->ptr->ai_addr, (int)sock->ptr->ai_addrlen) == 0){ break; }
 
-    closesocket(sock->ConnectSocket);
-    sock->ConnectSocket = INVALID_SOCKET;
+    closesocket(sock->conn.handle);
+    sock->conn.handle = INVALID_SOCKET;
 
   }
   freeaddrinfo(sock->result);
 
   sock->result = NULL;
   sock->ptr = NULL;
-  return sock->ConnectSocket != INVALID_SOCKET;
+  return sock->conn.handle != INVALID_SOCKET;
 }
 
-int tcp_send(TcpSocket *sock, const char *buf, int len){
+int tcp_send(TcpConn *conn, const char *buf, int len){
   int total = 0;
   while (total < len){
-    int n = send(sock->ConnectSocket, buf + total, len - total, 0);
+    int n = send(conn->handle, buf + total, len - total, 0);
     if (n == SOCKET_ERROR){ return 0;}
     total += n;
   }
   return 1;
 }
 
-int tcp_recv(TcpSocket *sock){
-  return recv(sock->ConnectSocket, sock->recvbuf, sock->recvbuflen - 1, 0);
+int tcp_recv(TcpConn *conn){
+  return recv(conn->handle, conn->recvbuf, conn->recvbuflen - 1, 0);
 }
 
-void tcp_close(TcpSocket *sock){
-  if (sock->ConnectSocket != INVALID_SOCKET){
-    closesocket(sock->ConnectSocket);
-    sock->ConnectSocket = INVALID_SOCKET;
+void tcp_close(TcpConn *conn){
+  if (conn->handle != INVALID_SOCKET){
+    closesocket(conn->handle);
+    conn->handle = INVALID_SOCKET;
   }
+}
+
+int tcp_listen(TcpListener *listener, const char *port){
+  ZeroMemory(&listener->hints, sizeof(listener->hints));
+  listener->hints.ai_family = AF_INET;
+  listener->hints.ai_socktype = SOCK_STREAM;
+  listener->hints.ai_protocol = IPPROTO_IP;
+
+  int i = getaddrinfo("127.0.0.1", port, &listener->hints, &listener->result);
+  if (i != 0){ printf("%d\n", i); return 0; }
+
+  listener->ListenSocket = socket(listener->result->ai_family, listener->result->ai_socktype, listener->result->ai_protocol);
+  if (listener->ListenSocket == INVALID_SOCKET){ 
+    printf("socket failed: %d\n", WSAGetLastError());
+    freeaddrinfo(listener->result);
+    return 0;
+  }
+  i = bind(listener->ListenSocket, listener->result->ai_addr, (int)listener->result->ai_addrlen);
+  if (i == SOCKET_ERROR){ 
+    printf("bind failed: %d\n", WSAGetLastError());
+    freeaddrinfo(listener->result);
+    return 0;
+  }
+
+  freeaddrinfo(listener->result);
+  listener->result = NULL;
+
+  i = listen(listener->ListenSocket, SOMAXCONN);
+  if (i == SOCKET_ERROR){ 
+    printf("listen failed: %d\n", WSAGetLastError());
+    closesocket(listener->ListenSocket);
+    return 0;
+  }
+  return 1;
+}
+
+int tcp_accept(TcpListener *listener, TcpConn *conn){
+  conn->handle = accept(listener->ListenSocket, NULL, NULL);
+  if (conn->handle == INVALID_SOCKET){
+    printf("accept failed: %d\n", WSAGetLastError());
+    return 0;
+  }
+  return 1;
+}
+
+void tcp_listener_close(TcpListener *listener){
+  if (listener->ListenSocket != INVALID_SOCKET){
+    closesocket(listener->ListenSocket);
+    listener->ListenSocket = INVALID_SOCKET;
+  }
+}
+
+void handle_client(TcpConn conn) {
+  int n;
+  while ((n = tcp_recv(&conn)) > 0) {
+    printf("received %d bytes\n", n);
+    tcp_send(&conn, conn.recvbuf, n);   // echo back
+  }
+  printf("client disconnected\n");
+  tcp_close(&conn);
 }
 
 int main(){
   WSADATA wsaData;
-  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0){ return 1;}
-  
-  TcpSocket sock;
-  if (!tcp_connect(&sock, "example.com", "80")){
-    printf("Connect failed\n");
+  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0){ return 1; }
+
+  TcpListener listener;
+  if (!tcp_listen(&listener, "61616")) {
     WSACleanup();
     return 1;
   }
-  const char* request =
-      "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
-  tcp_send(&sock, request, (int)strlen(request));
-  int n = 0;
-  while ((n = tcp_recv(&sock)) > 0){
-    sock.recvbuf[n] = '\0';
-    printf("%s", sock.recvbuf);
+  printf("listening on 127.0.0.1:61616\n");
+
+  for (;;) {
+    TcpConn conn;
+    if (!tcp_accept(&listener, &conn)) continue;
+    printf("client connected\n");
+    std::thread(handle_client, conn).detach();
   }
-  tcp_close(&sock);
+
+  tcp_listener_close(&listener);
   WSACleanup();
   return 0;
 }

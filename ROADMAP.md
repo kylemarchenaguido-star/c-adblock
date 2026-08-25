@@ -450,3 +450,16 @@ does everything `local-server.jar` + `rust-wrapper.exe` did together.
 - Chunked transfer-encoding, HTTP/1.1 keep-alive, redirects — none of the
   specific Twitch endpoints this project talks to need them for a working
   v1. Add later only if you hit a response that actually requires it.
+
+---
+
+## Hardening backlog (do last, after the client/server tracks work end to end)
+
+- **`dechunk` chunk-size bounds check** (`http/http_client.cpp`) —
+  `chunk_size` comes straight from `strtol` on the raw bytes a remote server
+  sends, with no validation. A malformed or hostile chunk-size line could
+  make it negative or huge, which would corrupt the
+  `*len - read_pos < chunk_size + 2` guard and the `memmove` length in the
+  compaction step right after it. Add a `chunk_size < 0` (and a sane upper
+  bound) check before it's used for anything, once the rest of the HTTP
+  client is working end to end.

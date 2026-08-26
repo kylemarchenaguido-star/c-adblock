@@ -8,7 +8,7 @@
 #include <minwinbase.h>
 #include <minwindef.h>
 #include <winbase.h>
-#include <thread>
+//#include <thread>
 
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Mswsock.lib")

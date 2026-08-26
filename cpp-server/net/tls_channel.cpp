@@ -263,17 +263,19 @@ int tls_recv(TlsConn *conn, char *buf, int len){
       if (buffers[i].BufferType == SECBUFFER_EXTRA){ extra_buf = &buffers[i]; }
     }
 
+    if (data_buf && data_buf->cbBuffer > 0){
+      memcpy(conn->plain_buf, data_buf->pvBuffer, data_buf->cbBuffer);
+      conn->plain_len = data_buf->cbBuffer;
+      conn->plain_pos = 0;
+    }
+
     conn->raw_len = 0;
     if (extra_buf && extra_buf->cbBuffer > 0){
       memmove(conn->raw_buf, extra_buf->pvBuffer, extra_buf->cbBuffer);
       conn->raw_len = extra_buf->cbBuffer;
     }
 
-    if (data_buf && data_buf->cbBuffer > 0){
-      memcpy(conn->plain_buf, data_buf->pvBuffer, data_buf->cbBuffer);
-      conn->plain_len = data_buf->cbBuffer;
-      conn->plain_pos = 0;
-
+    if (conn->plain_len > 0){
       int avail = conn->plain_len;
       int n = (len < avail) ? len : avail;
       memcpy(buf, conn->plain_buf, n);

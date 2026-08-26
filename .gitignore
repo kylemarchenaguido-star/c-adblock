@@ -1,2 +1,4 @@
 twitch-adblock/
 .claude/
+cpp-server/*.exe
+cpp-server/*.obj

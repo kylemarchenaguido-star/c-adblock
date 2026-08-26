@@ -1,14 +1,6 @@
 #pragma once
 #include "../net/tls_channel.h"
-
-#define HTTP_MAX_HEADERS 32
-#define HTTP_NAME_LEN 64
-#define HTTP_VALUE_LEN 1024
-
-struct HttpHeader {
-  char name[HTTP_NAME_LEN];
-  char value[HTTP_VALUE_LEN];
-};
+#include "http_common.h"
 
 struct HttpRequest {
   const char *method = "GET";
@@ -32,5 +24,5 @@ struct HttpResponse {
 
 int http_add_header(HttpRequest *req, const char *name, const char *value);
 int http_request(CredHandle *cred, HttpRequest *req, HttpResponse *res);
-const char* http_get_header(HttpRequest *res, const char *name);
+const char* http_get_header(HttpResponse *res, const char *name);
 void http_response_free(HttpResponse *res);

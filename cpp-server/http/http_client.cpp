@@ -197,10 +197,29 @@ int http_request(CredHandle *cred, HttpRequest *req, HttpResponse *res){
     }
     res->raw = buf;
     res->body = buf + header_end;
-    res->body_len = len - header_end;
+    res->body_len = body_len;
 
     tls_close(&conn);
     return 1;
   }
+
+  int content_lenght = -1;
+  const char *cl = http_get_header(res, "Content-Length");
+  if (cl){ content_lenght = atoi(cl); }
+
+  if (content_lenght >= 0){
+    while (len - header_end < content_lenght){
+      if (!recv_more(&conn, &buf, &len, &cap)){ break; }
+    }
+  } else {
+    while (recv_more(&conn, &buf, &len, &cap)){ }
+  }
+
+  res->raw = buf;
+  res->body = buf + header_end;
+  res->body_len = len - header_end;
+
+  tls_close(&conn);
+  return 1;
 }
 

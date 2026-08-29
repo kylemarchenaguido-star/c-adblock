@@ -229,7 +229,16 @@ static int read_request(TcpConn *conn, HttpServerRequest *req) {
   if (cl) {
     want = atoi(cl);
   }
-  if (want < 0) {
-    want = 0;
+  if (want < 0) { want = 0; }
+
+  while (len - header_end < want){
+    if (!recv_more(conn, &buf, &len, &cap)){ break; }
   }
+
+  // set these only once reverything is read: recv_more may have realloc'd buf
+  req->raw = buf;
+  req->raw_len = len;
+  req->body = buf + header_end;
+  if (req->body_len > want){ req->body_len = want; }
+  return 1;
 }

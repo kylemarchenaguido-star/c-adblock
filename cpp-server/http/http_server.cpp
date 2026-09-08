@@ -239,6 +239,15 @@ static int read_request(TcpConn *conn, HttpServerRequest *req) {
   req->raw = buf;
   req->raw_len = len;
   req->body = buf + header_end;
+  req->body_len = len - header_end;
   if (req->body_len > want){ req->body_len = want; }
   return 1;
+}
+
+static void request_free(HttpServerRequest *req){
+  free(req->raw);
+  req->raw = NULL;
+  req->raw_len = 0;
+  req->body = NULL;
+  req->body_len = 0;
 }

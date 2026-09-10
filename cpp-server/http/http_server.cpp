@@ -1,11 +1,13 @@
 #include "http_server.h"
 #include "http_common.h"
+#include <WinSock2.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string.h>
 
 #define HTTP_MAX_REQUEST (1024 * 1024)
-#define HTTP_RECV_TIMEOUT_MS 5000;
+#define HTTP_RECV_TIMEOUT_MS 5000
 
 const char *http_req_header(HttpServerRequest *req, const char *name) {
   for (int i = 0; i < req->header_count; ++i) {
@@ -251,3 +253,70 @@ static void request_free(HttpServerRequest *req){
   req->body = NULL;
   req->body_len = 0;
 }
+
+static void send_response(TcpConn *conn, HttpServerResponse *res){
+  char head[1024];
+  int n = snprintf(head, sizeof(head), 
+                  "HTTP/1.1 %d %s\r\n"
+                  "Access-Control-Allow-Origin: *\r\n"
+                  "Access-Control-Allow-Methods: *\r\n"
+                  "Access-Control-Allow-Headers: *\r\n"
+                  "Access-Control-Allow-Credentials: true\r\n"
+                  "Content-Type: %s\r\n"
+                  "Content-Length: %d\r\n"
+                  "Connection: close\r\n"
+                  "\r\n",
+                   res->status, status_text(res->status), res->content_type,
+                   res->body_len);
+  if (n < 0 || n >= (int)sizeof(head)){ return; }
+
+  if (!tcp_send(conn, head, n)){ return; }
+  if (res->body && res->body_len > 0){ tcp_send(conn, res->body, res->body_len); }
+}
+
+// '*' matches everything, a traling '*' is a prefi match, otherwise exact
+static int route_matches(HttpRoute *route, HttpServerRequest*req){
+  if (route->method && _stricmp(route->method, req->method) != 0){ return 0; }
+  int n = (int)strlen(route->path);
+  if (n > 0 && route->path[n - 1] == '*'){
+    return strncmp(req->path, route->path, n - 1) == 0;
+  }
+  return strcmp(req->path, route->path) == 0;
+}
+ 
+static void handle_connection(HttpServer *srv, TcpConn conn){
+  DWORD timeout = HTTP_RECV_TIMEOUT_MS;
+  setsockopt(conn.handle, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+  
+  HttpServerRequest req;
+  HttpServerResponse res;
+
+  int read = read_request(&conn, &req);
+  if (read < 0){ tcp_close(&conn); return; } // idle or dropped, nothing to answer
+  if (read == 0){
+    http_res_text(&res, 400, "text/plain", "Bad Request", -1);
+    send_response(&conn, &res);
+    tcp_close(&conn);
+    return;
+  }
+
+  HttpHandler handler = NULL;
+  for (int i = 0; i < srv->route_count; ++i){
+    if (route_matches(&srv->routes[i], &req)){ handler = srv->routes[i].handler; break; }
+  }
+
+  if (handler){ handler(&req, &res); }
+  else {http_res_text(&res, 404, "text/plain", "Not found", -1); }
+  
+  send_response(&conn, &res);
+  if (res.body_owned && res.body){ free((void *)res.body); }
+  request_free(&req);
+  tcp_close(&conn);
+}
+
+int http_server_start(HttpServer *srv, const char *port){
+  if (!tcp_listen(&srv->listener, port)){ return 0; }
+  srv->running = 1;
+  return 1;
+}
+

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string.h>
+#include <thread>
 
 #define HTTP_MAX_REQUEST (1024 * 1024)
 #define HTTP_RECV_TIMEOUT_MS 5000
@@ -320,3 +321,19 @@ int http_server_start(HttpServer *srv, const char *port){
   return 1;
 }
 
+void http_server_run(HttpServer *srv){
+  while (srv->running) {
+    TcpConn conn;
+    if (!tcp_accept(&srv->listener, &conn)){
+      if (!srv->running){ break; } // was closed by http_server_stop
+      continue;
+    }
+    std::thread(handle_connection, srv, conn).detach();
+
+  }
+}
+
+void http_server_stop(HttpServer *srv){
+  srv->running = 0;
+  tcp_listener_close(&srv->listener);
+}

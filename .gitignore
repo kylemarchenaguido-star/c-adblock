@@ -2,3 +2,4 @@ twitch-adblock/
 .claude/
 cpp-server/*.exe
 cpp-server/*.obj
+cpp-server/tests/fixtures/

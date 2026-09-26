@@ -52,7 +52,7 @@ JsonValue json_string_n(const char *s, int len);
 JsonValue json_array();
 JsonValue json_object();
 int json_push(JsonValue *arr, JsonValue item);
-int json_ste(JsonValue *obj, const char *key, JsonValue value);
+int json_set(JsonValue *obj, const char *key, JsonValue value);
 
 // compact output, no whitespace, same shape as org.json's toString()
 // returns a malloc'd NUL-terminated string (free() it), length in *out_len.
